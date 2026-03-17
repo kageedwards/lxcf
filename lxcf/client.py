@@ -458,13 +458,25 @@ class Client:
         """
         Callback from an RNS GROUP destination when a packet arrives.
 
-        We need to unpack the LXMF message from the raw packet data,
-        then extract the LXCF stanza from its fields.
+        Opportunistic LXMF packets omit the destination hash prefix,
+        so the decrypted data layout is:
+            source_hash(16) + signature(64) + msgpack_payload
+
+        We prepend the destination hash (from the packet) so that
+        LXMF.LXMessage.unpack_from_bytes receives the full format it
+        expects:
+            dest_hash(16) + source_hash(16) + signature(64) + payload
         """
         try:
             import LXMF
 
-            lxm = LXMF.LXMessage.unpack_from_bytes(data)
+            # Reconstruct the full LXMF frame expected by unpack_from_bytes
+            dest_hash = getattr(packet, "destination_hash", None)
+            if dest_hash is None:
+                return
+            full_data = bytes(dest_hash) + bytes(data)
+
+            lxm = LXMF.LXMessage.unpack_from_bytes(full_data)
             if lxm is None:
                 return
 

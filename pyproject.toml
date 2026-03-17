@@ -11,7 +11,11 @@ license = "MIT"
 dependencies = ["rns", "lxmf"]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest", "hypothesis"]
 
 [tool.setuptools.packages.find]
 include = ["lxcf*"]
+
+[tool.pytest.ini_options]
+markers = ["live: live runtime tests (require rnsd)"]
+addopts = "-m 'not live'"
