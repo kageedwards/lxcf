@@ -1,6 +1,6 @@
 # LXCF
 
-Lightweight eXtensible Channel Format — an IRC-style messaging protocol over [LXMF](https://github.com/markqvist/LXMF) and [Reticulum](https://github.com/markqvist/Reticulum).
+Lightweight eXtensible CHANNEL Format — an IRC-style semantic layer / protocol over [LXMF](https://github.com/markqvist/LXMF) and [Reticulum](https://github.com/markqvist/Reticulum).
 
 LXCF embeds structured stanzas inside standard LXMF messages using `FIELD_CUSTOM_TYPE` / `FIELD_CUSTOM_DATA`, so all traffic is transparent to existing LXMF clients and propagation nodes.
 
@@ -14,10 +14,9 @@ RNS   — mesh networking, cryptographic identities
 
 ## Features
 
-- 14 stanza types: message, privmsg, join, leave, nick, topic, emote, announce, reaction, query, reply, names, ping, pong
+- 8 stanza types: message, privmsg, join, leave, nick, topic, emote, announce
 - Channels map to deterministic RNS GROUP destinations
 - Private channels via shared subnet passphrases (SHA-256 derived symmetric keys)
-- Direct messages over Curve25519 ECDH links
 - Local-only mode for testing without a mesh stack
 - Lightweight event bus for pub/sub
 
@@ -27,11 +26,11 @@ RNS   — mesh networking, cryptographic identities
 pip install -e .
 ```
 
-Requires Python ≥ 3.10. RNS and LXMF are installed as dependencies but imported lazily — the library can be used in local mode without them.
+Requires Python ≥ 3.10. RNS and LXMF are installed as dependencies but imported lazily — the library can be used without the underlying stack for testing.
 
 ## Quick Start
 
-### Local Mode (no network)
+### Local Testing (no network stack)
 
 ```python
 import lxcf
@@ -78,11 +77,9 @@ lxcf/
   util.py        — nick formatting, deduplication
 ```
 
-## Clients
+## See also
 
-- [lxcf-tui](https://github.com/kageedwards/lxcf-tui) — terminal client (Textual)
 - [lxcf-js](https://github.com/kageedwards/lxcf-js) — JavaScript port
-- [Portulus](https://github.com/kageedwards/portulus) — desktop client (Electron)
 
 ## License
 
