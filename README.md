@@ -2,6 +2,8 @@
 
 Lightweight eXtensible CHANNEL Format — an IRC-style semantic layer / protocol over [LXMF](https://github.com/markqvist/LXMF) and [Reticulum](https://github.com/markqvist/Reticulum).
 
+### Major work-in-progress right now.
+
 LXCF embeds structured stanzas inside standard LXMF messages using `FIELD_CUSTOM_TYPE` / `FIELD_CUSTOM_DATA`, so all traffic is transparent to existing LXMF clients and propagation nodes.
 
 ## Protocol Stack
