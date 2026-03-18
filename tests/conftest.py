@@ -15,6 +15,7 @@ from lxcf.protocol import (
     MessageType,
 )
 from lxcf.message import LXCFMessage
+from lxcf.envelope import ChannelEnvelope
 from lxcf.client import Client
 
 # ---------------------------------------------------------------------------
@@ -96,6 +97,35 @@ def non_lxcf_fields(draw) -> dict:
 def identity_hash() -> st.SearchStrategy[bytes]:
     """Generate a 16-byte identity hash."""
     return st.binary(min_size=16, max_size=16)
+
+
+def channel_hash() -> st.SearchStrategy[bytes]:
+    """Generate a 16-byte Channel_Hash value."""
+    return st.binary(min_size=16, max_size=16)
+
+
+def subscriber_set() -> st.SearchStrategy[set[bytes]]:
+    """Generate a set of 1-10 distinct 16-byte destination hashes."""
+    return st.frozensets(
+        st.binary(min_size=16, max_size=16),
+        min_size=1,
+        max_size=10,
+    ).map(set)
+
+
+@st.composite
+def channel_envelope(draw) -> ChannelEnvelope:
+    """Generate a valid ChannelEnvelope wrapping an arbitrary LXCFMessage."""
+    msg = draw(lxcf_message())
+    ch = draw(channel_hash())
+    src = draw(identity_hash())
+    fields = msg.to_fields()
+    return ChannelEnvelope(
+        channel_hash=ch,
+        source_hash=src,
+        custom_type=fields[FIELD_CUSTOM_TYPE],
+        custom_data=fields[FIELD_CUSTOM_DATA],
+    )
 
 
 # ---------------------------------------------------------------------------

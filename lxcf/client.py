@@ -32,9 +32,10 @@ import time
 from typing import Callable
 
 from lxcf.channel import Channel
+from lxcf.envelope import ChannelEnvelope, encrypt_custom_data, decrypt_custom_data
 from lxcf.events import EventBus
 from lxcf.message import LXCFMessage
-from lxcf.protocol import FIELD_CUSTOM_TYPE, PROTOCOL_NAME, MessageType
+from lxcf.protocol import FIELD_CUSTOM_DATA, FIELD_CUSTOM_TYPE, PROTOCOL_NAME, MessageType, derive_channel_hash
 
 log = logging.getLogger("lxcf")
 
@@ -86,6 +87,7 @@ class Client:
 
         self.channels: dict[str, Channel] = {}  # channel_id -> Channel
         self._dest_to_cid: dict[bytes, str] = {}  # destination hash -> channel_id
+        self._channel_hash_to_cid: dict[bytes, str] = {}  # Channel_Hash -> channel_id
         self.trusted: set[bytes] = set()
         self.blocked: set[bytes] = set()
 
@@ -173,7 +175,7 @@ class Client:
     # Channel management
     # ------------------------------------------------------------------
 
-    def join(self, channel_name: str, key: bytes | None = None, announce: bool = True) -> Channel:
+    def join(self, channel_name: str, key: bytes | None = None, announce: bool = True, hub: bytes | None = None) -> Channel:
         """
         Join (or create) a channel.
 
@@ -186,6 +188,11 @@ class Client:
         announce : bool
             If True (default), broadcast a JOIN stanza so other
             members know you're here.  Set to False to join silently.
+        hub : bytes | None
+            16-byte destination hash of the hub to route through.
+            When set, channel messages are sent as Channel Envelopes
+            to the hub via LXMF SINGLE delivery.  When None, the
+            channel uses the existing GROUP destination behavior.
         """
         cid = channel_id(channel_name, key)
         if cid in self.channels:
@@ -194,7 +201,11 @@ class Client:
         group_dest = self._make_group_destination(channel_name, key=key)
         ch = Channel(channel_name, self, group_destination=group_dest)
         ch._cid = cid
+        ch.channel_hash = derive_channel_hash(channel_name, key)
+        ch.hub_hash = hub
+        ch.key = key
         self.channels[cid] = ch
+        self._channel_hash_to_cid[ch.channel_hash] = cid
 
         if group_dest is not None:
             self._dest_to_cid[group_dest.hash] = cid
@@ -203,7 +214,10 @@ class Client:
 
         if announce:
             join_msg = LXCFMessage.join(self.nick, channel_name)
-            self._send_to_channel(ch, join_msg)
+            if hub is not None:
+                self._send_to_hub(ch, join_msg)
+            else:
+                self._send_to_channel(ch, join_msg)
         self.events.emit("join", ch, self.nick)
         log.info("Joined %s%s", channel_name, "" if announce else " (silent)")
         return ch
@@ -215,7 +229,10 @@ class Client:
             return
         if announce:
             leave_msg = LXCFMessage.leave(self.nick, ch.name)
-            self._send_to_channel(ch, leave_msg)
+            if ch.hub_hash is not None:
+                self._send_to_hub(ch, leave_msg)
+            else:
+                self._send_to_channel(ch, leave_msg)
 
         # Deregister the GROUP destination so it can be re-created on rejoin.
         if ch.destination is not None:
@@ -225,6 +242,8 @@ class Client:
                 RNS.Transport.deregister_destination(ch.destination)
             except Exception:
                 pass
+
+        self._channel_hash_to_cid.pop(ch.channel_hash, None)
 
         self.events.emit("leave", ch, self.nick)
         log.info("Left %s%s", ch.name, "" if announce else " (silent)")
@@ -341,8 +360,69 @@ class Client:
         if msg.type not in (MessageType.JOIN, MessageType.LEAVE, MessageType.ANNOUNCE):
             self.events.emit(msg.type, channel, msg)
 
-        if self._router is not None and channel.destination is not None:
-            self._lxmf_send_group(channel, msg)
+        if self._router is not None:
+            if channel.hub_hash is not None:
+                self._send_to_hub(channel, msg)
+            elif channel.destination is not None:
+                self._lxmf_send_group(channel, msg)
+
+    def _send_to_hub(self, channel: Channel, msg: LXCFMessage):
+        """Wrap an LXCFMessage in a Channel Envelope and send to the hub."""
+        if self._router is None or channel.hub_hash is None:
+            return
+
+        msg_fields = msg.to_fields()
+        custom_data = msg_fields[FIELD_CUSTOM_DATA]
+
+        # Encrypt the inner stanza for private channels
+        if channel.key is not None:
+            custom_data = encrypt_custom_data(custom_data, channel.key)
+
+        envelope = ChannelEnvelope(
+            channel_hash=channel.channel_hash,
+            source_hash=self._destination.hash,
+            custom_type=msg_fields[FIELD_CUSTOM_TYPE],
+            custom_data=custom_data,
+        )
+
+        try:
+            import RNS
+            import LXMF
+
+            fields = envelope.to_fields()
+            dest_hash = channel.hub_hash
+
+            recipient_identity = RNS.Identity.recall(dest_hash)
+            if recipient_identity is None:
+                RNS.Transport.request_path(dest_hash)
+                log.info("Path to hub %s unknown, requested — message queued", dest_hash.hex())
+
+                lxm = LXMF.LXMessage(
+                    None,
+                    self._destination,
+                    "",
+                    fields=fields,
+                    destination_hash=dest_hash,
+                    desired_method=LXMF.LXMessage.DIRECT,
+                )
+            else:
+                dest = RNS.Destination(
+                    recipient_identity,
+                    RNS.Destination.OUT,
+                    RNS.Destination.SINGLE,
+                    "lxmf", "delivery",
+                )
+                lxm = LXMF.LXMessage(
+                    dest,
+                    self._destination,
+                    "",
+                    fields=fields,
+                    desired_method=LXMF.LXMessage.DIRECT,
+                )
+
+            self._router.handle_outbound(lxm)
+        except Exception as exc:
+            log.error("LXMF send to hub failed: %s", exc)
 
     def _send_direct(self, destination_hash: bytes, msg: LXCFMessage):
         """Send a direct LXMF message to a single destination."""
@@ -436,10 +516,50 @@ class Client:
     def _on_lxmf_delivery(self, message):
         """
         Callback from LXMRouter for SINGLE destination deliveries
-        (direct messages).
+        (direct messages and hub-relayed Channel Envelopes).
         """
         try:
             fields = message.fields if hasattr(message, "fields") else {}
+
+            # --- Channel Envelope path (hub-relayed messages) ---
+            if ChannelEnvelope.is_envelope(fields):
+                envelope = ChannelEnvelope.from_fields(fields)
+
+                # Discard if no matching local channel
+                cid = self._channel_hash_to_cid.get(envelope.channel_hash)
+                if cid is None:
+                    return
+
+                # Suppress self-echo
+                if self._destination and envelope.source_hash == self._destination.hash:
+                    return
+
+                # Blocked sender check
+                if envelope.source_hash and self.is_blocked(envelope.source_hash):
+                    log.debug("Blocked envelope from %s", envelope.source_hash.hex())
+                    return
+
+                # Decrypt encrypted envelopes (private channels)
+                channel = self.channels.get(cid)
+                if channel is None:
+                    return
+
+                if isinstance(envelope.custom_data, bytes):
+                    if channel.key is None:
+                        log.warning("Received encrypted envelope but no key for channel %s", cid)
+                        return
+                    try:
+                        envelope.custom_data = decrypt_custom_data(envelope.custom_data, channel.key)
+                    except Exception:
+                        log.warning("Decryption failed for channel %s — wrong key?", cid)
+                        return
+
+                msg = envelope.unwrap()
+
+                self._dispatch_inbound(msg, source_hash=envelope.source_hash, target_channel=channel)
+                return
+
+            # --- Regular direct LXCF message path ---
             if not LXCFMessage.is_lxcf(fields):
                 return
 

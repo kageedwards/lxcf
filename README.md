@@ -2,7 +2,7 @@
 
 Lightweight eXtensible CHANNEL Format — an IRC-style semantic layer / protocol over [LXMF](https://github.com/markqvist/LXMF) and [Reticulum](https://github.com/markqvist/Reticulum).
 
-### Major work-in-progress right now.
+### Multi-hop channel messaging via relay hubs. Private channels, deterministic addressing, and all 8 stanza types work across the full Reticulum mesh.
 
 LXCF embeds structured stanzas inside standard LXMF messages using `FIELD_CUSTOM_TYPE` / `FIELD_CUSTOM_DATA`, so all traffic is transparent to existing LXMF clients and propagation nodes.
 
@@ -17,8 +17,10 @@ RNS   — mesh networking, cryptographic identities
 ## Features
 
 - 8 stanza types: message, privmsg, join, leave, nick, topic, emote, announce
-- Channels map to deterministic RNS GROUP destinations
-- Private channels via shared subnet passphrases (SHA-256 derived symmetric keys)
+- Relay hub model for multi-hop channel messaging across the mesh
+- Channels identified by deterministic SHA-256 hashes (16 bytes)
+- Private channels via symmetric key encryption (hub cannot read payload)
+- Per-channel hub association — join channels on different hubs simultaneously
 - Local-only mode for testing without a mesh stack
 - Lightweight event bus for pub/sub
 
@@ -62,6 +64,38 @@ ch = client.join("#mesh")
 ch.send("hello mesh")
 ```
 
+### Via Relay Hub
+
+```python
+import RNS, LXMF, lxcf
+
+reticulum = RNS.Reticulum()
+identity = RNS.Identity()
+router = LXMF.LXMRouter(identity=identity, storagepath="./store")
+dest = router.register_delivery_identity(identity, display_name="alice")
+
+client = lxcf.Client(router=router, destination=dest, nick="alice")
+
+# Join a channel through a relay hub (multi-hop)
+hub_hash = bytes.fromhex("abcdef0123456789abcdef0123456789")
+ch = client.join("#mesh", hub=hub_hash)
+ch.send("hello mesh — relayed across the network")
+```
+
+### Running a Hub
+
+```python
+import RNS, LXMF, lxcf
+
+reticulum = RNS.Reticulum()
+identity = RNS.Identity()
+router = LXMF.LXMRouter(identity=identity, storagepath="./hub_store")
+
+hub = lxcf.Hub(router=router, identity=identity)
+print(f"Hub running: {hub.destination_hash.hex()}")
+# Hub now accepts subscriptions and relays channel messages
+```
+
 ## Examples
 
 - `examples/local_demo.py` — two clients chatting locally, no network needed
@@ -71,10 +105,12 @@ ch.send("hello mesh")
 
 ```
 lxcf/
-  protocol.py    — constants, MessageType enum, LXMF field IDs
+  protocol.py    — constants, MessageType enum, LXMF field IDs, Channel_Hash derivation
   message.py     — LXCFMessage serialization
-  channel.py     — Channel state (members, topic, history)
-  client.py      — Client API, LXMF integration, event dispatch
+  channel.py     — Channel state (members, topic, history, hub association)
+  client.py      — Client API, LXMF integration, hub-aware routing, event dispatch
+  envelope.py    — ChannelEnvelope for hub relay, private channel encryption
+  hub.py         — Relay Hub: subscription registry, message fan-out
   events.py      — EventBus pub/sub
   util.py        — nick formatting, deduplication
 ```

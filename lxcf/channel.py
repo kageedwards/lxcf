@@ -45,6 +45,9 @@ class Channel:
         self.member_hashes: dict[str, bytes] = {}  # nick -> identity hash
         self.history: list[LXCFMessage] = []
         self._max_history = 256
+        self.hub_hash: bytes | None = None
+        self.channel_hash: bytes = b""
+        self.key: bytes | None = None  # symmetric key for private channels
 
     # ------------------------------------------------------------------
     # Public helpers
