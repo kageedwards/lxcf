@@ -6,6 +6,8 @@ FIELD_CUSTOM_TYPE / FIELD_CUSTOM_DATA mechanism, so they interoperate
 cleanly with any LXMF client or propagation node.
 """
 
+import hashlib
+
 PROTOCOL_NAME    = "LXCF"
 PROTOCOL_VERSION = 1
 
@@ -15,6 +17,10 @@ PROTOCOL_VERSION = 1
 # installed (for offline tests / message construction).
 FIELD_CUSTOM_TYPE = 0xFB
 FIELD_CUSTOM_DATA = 0xFC
+
+# Channel Envelope routing fields (LXMF user-defined field range)
+FIELD_CHANNEL_HASH = 0xFD
+FIELD_SOURCE_HASH  = 0xFE
 
 
 class MessageType:
@@ -38,3 +44,12 @@ class MessageType:
         MESSAGE, PRIVMSG, JOIN, LEAVE, NICK, TOPIC,
         EMOTE, ANNOUNCE,
     }
+
+
+def derive_channel_hash(name: str, key: bytes | None = None) -> bytes:
+    """
+    Derive a 16-byte Channel_Hash from a channel name and optional key.
+
+    SHA-256(name.encode("utf-8") + (key or b"")) truncated to 16 bytes.
+    """
+    return hashlib.sha256(name.encode("utf-8") + (key or b"")).digest()[:16]

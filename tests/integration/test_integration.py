@@ -239,7 +239,7 @@ def test_blocked_sender_message_dropped():
     blocked_hash = b"\xbb" * 16
     client.block(blocked_hash)
 
-    # Simulate what _on_lxmf_delivery / _on_group_packet do:
+    # Simulate what _on_lxmf_delivery does:
     # check is_blocked before dispatching
     msg = LXCFMessage.chat("evil", "#test", "spam")
     if not client.is_blocked(blocked_hash):
@@ -425,15 +425,15 @@ def test_nick_change_fires_event():
 
 def test_nick_change_preserves_member_hashes():
     """change_nick moves the identity hash from old nick to new nick."""
-    client = Client(nick="alice")
+    # Use a mock destination so the hash-based path is exercised
+    class FakeDest:
+        hash = b"\xdd" * 16
+    client = Client(nick="alice", destination=FakeDest())
     ch = client.join("#test", announce=False)
-    # Manually set a hash for alice to verify it transfers
-    fake_hash = b"\xdd" * 16
-    ch.member_hashes["alice"] = fake_hash
 
     client.change_nick("alicia", announce=False)
 
-    assert ch.member_hashes.get("alicia") == fake_hash
+    assert ch.member_hashes.get("alicia") == FakeDest.hash
     assert "alice" not in ch.member_hashes
 
 

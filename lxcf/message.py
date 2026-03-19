@@ -17,6 +17,7 @@ class LXCFMessage:
     __slots__ = (
         "type", "nick", "channel", "body",
         "thread", "ref", "timestamp", "extra",
+        "_local",
     )
 
     def __init__(
@@ -40,6 +41,7 @@ class LXCFMessage:
         self.ref = ref
         self.timestamp = timestamp or time.time()
         self.extra = extra or {}
+        self._local = False
 
     def to_fields(self) -> dict:
         """Return a dict for passing as fields= to LXMF.LXMessage()."""
