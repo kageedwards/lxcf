@@ -1,0 +1,6 @@
+{
+  "name": "lxcf",
+  "version": "0.1.0",
+  "description": "LXCF Python bridge — packaged for Portulus",
+  "private": true
+}

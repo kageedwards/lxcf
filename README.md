@@ -85,15 +85,22 @@ ch.send("hello mesh — relayed across the network")
 ### Running a Hub
 
 ```python
-import RNS, LXMF, lxcf
+import RNS, LXMF
+from lxcf.hub import Hub
 
 reticulum = RNS.Reticulum()
 identity = RNS.Identity()
 router = LXMF.LXMRouter(identity=identity, storagepath="./hub_store")
 
-hub = lxcf.Hub(router=router, identity=identity)
+hub = Hub(router=router, identity=identity)
 print(f"Hub running: {hub.destination_hash.hex()}")
 # Hub now accepts subscriptions and relays channel messages
+```
+
+Or use the standalone daemon:
+
+```bash
+python -m lxcf_hub --store ~/.lxcf-hub --max-channels 64
 ```
 
 ## Examples
