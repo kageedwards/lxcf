@@ -5,17 +5,17 @@ LXCF over LXMF — real mesh messaging example.
 Requires: pip install rns lxmf
 
 This creates a Reticulum instance, an LXMF router, and an LXCF
-client wired into it.  Channel messages use GROUP destinations
-(AES-128 symmetric encryption), direct messages use SINGLE
-destinations (Curve25519 ECDH).
+client wired into it.  Channel messages are routed through relay
+hubs via LXMF SINGLE delivery wrapped in Channel Envelopes.
+Direct messages use SINGLE destinations (Curve25519 ECDH).
 
 Run two instances in separate terminals to chat:
 
     Terminal 1:  python examples/lxmf_demo.py --nick alice
     Terminal 2:  python examples/lxmf_demo.py --nick bob
 
-Each instance prints its destination hash on startup.  Use /dm
-to send direct messages, or just type to chat on #mesh.
+Each instance prints its destination hash on startup.  Type to
+chat on #mesh, or use slash commands.
 """
 
 import argparse
@@ -90,15 +90,13 @@ def main():
     # 4. Announce so others can find us
     router.announce(dest.hash)
 
-    # 5. Join default channel (creates a GROUP destination)
+    # 5. Join default channel
     ch = client.join(args.channel)
 
     print(f"LXCF ready — {client.nick} on {args.channel}")
     print(f"Address: {dest.hash.hex()}")
-    if ch.destination:
-        print(f"Channel group hash: {ch.destination.hexhash}")
     print()
-    print("Commands: /dm <hash> <msg> | /me <action> | /topic <text> | /nick <name> | /quit")
+    print("Commands: /me <action> | /topic <text> | /nick <name> | /quit")
     print()
 
     # 6. Input loop
@@ -112,25 +110,19 @@ def main():
         if not line.strip():
             continue
 
-        if line.startswith("/dm "):
-            parts = line.split(" ", 2)
-            if len(parts) < 3:
-                print("Usage: /dm <destination_hash> <message>")
-                continue
-            client.privmsg(parts[1], parts[2])
-
-        elif line.startswith("/me "):
+        if line.startswith("/me "):
             ch.emote(line[4:])
 
         elif line.startswith("/topic "):
             ch.set_topic(line[7:])
 
         elif line.startswith("/nick "):
-            client.nick = line[6:].strip()
-            print(f"Nick changed to {client.nick}")
+            new_nick = line[6:].strip()
+            client.change_nick(new_nick)
+            print(f"Nick changed to {new_nick}")
 
         elif line.strip() == "/quit":
-            client.leave(args.channel)
+            client.leave(ch._cid)
             break
 
         else:
