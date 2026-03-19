@@ -4,6 +4,6 @@
   "description": "LXCF Python bridge — packaged for Portulus",
   "private": true,
   "scripts": {
-    "postinstall": "python3 -m pip install --quiet rns lxmf msgpack"
+    "postinstall": "python3 setup_venv.py"
   }
 }
