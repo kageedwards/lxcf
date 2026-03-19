@@ -84,13 +84,22 @@ class Hub:
         """
         fields = message.fields if hasattr(message, "fields") else {}
 
+        # DEBUG: remove for production
+        src_hash = getattr(message, "source_hash", None)
+        src_hex = src_hash.hex() if src_hash else "?"
+        print(f"[hub-debug] LXMF delivery received from {src_hex} ({len(src_hash) if src_hash else 0} bytes), fields keys: {[hex(k) if isinstance(k, int) else k for k in fields.keys()]}", flush=True)
+
         if not ChannelEnvelope.is_envelope(fields):
+            # DEBUG: remove for production
+            print(f"[hub-debug] NOT an envelope — ignoring (no FIELD_CHANNEL_HASH in fields)", flush=True)
             return
 
         try:
             envelope = ChannelEnvelope.from_fields(fields)
         except ValueError as exc:
             log.warning("Hub: discarding malformed envelope: %s", exc)
+            # DEBUG: remove for production
+            print(f"[hub-debug] Malformed envelope: {exc}", flush=True)
             return
 
         if not isinstance(envelope.channel_hash, bytes) or len(envelope.channel_hash) != 16:
@@ -99,7 +108,13 @@ class Hub:
                 "(expected 16 bytes, got %d)",
                 len(envelope.channel_hash) if isinstance(envelope.channel_hash, bytes) else 0,
             )
+            # DEBUG: remove for production
+            print(f"[hub-debug] Bad Channel_Hash length — discarding", flush=True)
             return
+
+        # DEBUG: remove for production
+        stanza_type = envelope.custom_data.get("t") if isinstance(envelope.custom_data, dict) else "<encrypted>"
+        print(f"[hub-debug] Valid envelope: ch={envelope.channel_hash.hex()} ({len(envelope.channel_hash)}B) src={envelope.source_hash.hex()} ({len(envelope.source_hash)}B) type={stanza_type}", flush=True)
 
         self._handle_envelope(envelope, message)
 
@@ -145,10 +160,14 @@ class Hub:
 
             # Add sender, then relay JOIN to existing subscribers
             subs.add(src)
+            # DEBUG: remove for production
+            print(f"[hub-debug] JOIN: added {src.hex()} ({len(src)}B) to ch={ch.hex()[:8]}, subscribers now: {[s.hex() for s in subs]}", flush=True)
             self._relay(ch, envelope, exclude=src)
 
         elif stanza_type == MessageType.LEAVE:
             # Relay LEAVE to remaining subscribers, then remove sender
+            # DEBUG: remove for production
+            print(f"[hub-debug] LEAVE: {src.hex()} from ch={ch.hex()[:8]}", flush=True)
             self._relay(ch, envelope, exclude=src)
             subs = self._subscriptions.get(ch)
             if subs is not None:
@@ -158,6 +177,10 @@ class Hub:
 
         else:
             # All other stanza types: relay without side effects
+            subs = self._subscriptions.get(ch, set())
+            targets = subs - {src}
+            # DEBUG: remove for production
+            print(f"[hub-debug] RELAY type={stanza_type}: from {src.hex()} on ch={ch.hex()[:8]}, relaying to {[t.hex() for t in targets]} (total subs: {[s.hex() for s in subs]})", flush=True)
             self._relay(ch, envelope, exclude=src)
 
     def _relay(self, channel_hash: bytes, envelope: ChannelEnvelope, exclude: bytes) -> None:
@@ -172,10 +195,14 @@ class Hub:
         """
         subs = self._subscriptions.get(channel_hash)
         if not subs:
+            # DEBUG: remove for production
+            print(f"[hub-debug] _relay: no subscribers for ch={channel_hash.hex()[:8]} — nothing to send", flush=True)
             return
 
         targets = subs - {exclude}
         if not targets:
+            # DEBUG: remove for production
+            print(f"[hub-debug] _relay: all subscribers excluded for ch={channel_hash.hex()[:8]} (only sender subscribed)", flush=True)
             return
 
         import RNS
@@ -186,8 +213,12 @@ class Hub:
         for dest_hash in targets:
             try:
                 recipient_identity = RNS.Identity.recall(dest_hash)
+                # DEBUG: remove for production
+                print(f"[hub-debug]   -> sending to {dest_hash.hex()} ({len(dest_hash)}B), identity recalled: {recipient_identity is not None}", flush=True)
                 if recipient_identity is None:
                     RNS.Transport.request_path(dest_hash)
+                    # DEBUG: remove for production
+                    print(f"[hub-debug]   -> identity unknown for {dest_hash.hex()}, requested path (message may not deliver)", flush=True)
                     lxm = LXMF.LXMessage(
                         None,
                         self._destination,
@@ -211,10 +242,14 @@ class Hub:
                         desired_method=LXMF.LXMessage.DIRECT,
                     )
                 self._router.handle_outbound(lxm)
+                # DEBUG: remove for production
+                print(f"[hub-debug]   -> handle_outbound called OK for {dest_hash.hex()}", flush=True)
             except Exception as exc:
                 log.error(
                     "Hub: relay to %s failed: %s", dest_hash.hex()[:8], exc,
                 )
+                # DEBUG: remove for production
+                print(f"[hub-debug]   -> RELAY FAILED to {dest_hash.hex()}: {exc}", flush=True)
 
     def __repr__(self) -> str:
         n_channels = len(self._subscriptions)

@@ -6,6 +6,10 @@ goes through LXMF's LXMRouter and LXMessage APIs.  RNS is only
 imported inside methods that need to create Destination objects, and
 only when a live router is present.
 
+All channel traffic is routed through hubs via LXMF SINGLE
+destinations.  Each hub is a daemon that receives Channel Envelopes
+and relays them to subscribers.
+
 Usage — connected (caller owns the LXMF router)::
 
     import RNS, LXMF, lxcf
@@ -16,7 +20,7 @@ Usage — connected (caller owns the LXMF router)::
     dest      = router.register_delivery_identity(identity, display_name="kage")
 
     client = lxcf.Client(router=router, destination=dest, nick="kage")
-    ch = client.join("#mesh")
+    ch = client.join("#mesh", hub=hub_hash)
     ch.send("Hello mesh")
 
 Usage — local-only (no LXMF, for tests)::
@@ -28,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import sys
 import time
 from typing import Callable
 
@@ -39,23 +44,23 @@ from lxcf.protocol import FIELD_CUSTOM_DATA, FIELD_CUSTOM_TYPE, PROTOCOL_NAME, M
 
 log = logging.getLogger("lxcf")
 
-# LXMF app name / aspect used for group destinations.
-# This keeps LXCF group traffic in its own namespace.
-LXCF_APP_NAME = "lxcf"
-LXCF_GROUP_ASPECT = "channel"
+
+def _dbg(msg: str) -> None:
+    """Debug print to stderr (safe for bridge stdout protocol). Remove for production."""
+    print(msg, file=sys.stderr, flush=True)
 
 
-def channel_id(name: str, key: bytes | None = None) -> str:
+def channel_id(name: str, hub: bytes | None = None) -> str:
     """
     Return a unique internal identifier for a channel.
 
-    Open channels use the bare name (e.g. ``"#mesh"``).
-    Keyed channels include a short hash of the key so that
-    ``#mesh`` on different subnets get separate entries.
+    The CID is ``#name@XXXXXXXX`` where ``XXXXXXXX`` is the first 8 hex
+    chars of the hub destination hash.  When no hub is provided (local
+    mode), the bare channel name is returned.
     """
-    if key is None:
+    if hub is None:
         return name
-    return f"{name}@{hashlib.sha256(key).hexdigest()[:8]}"
+    return f"{name}@{hub.hex()[:8]}"
 
 
 class Client:
@@ -86,7 +91,6 @@ class Client:
         self.events = EventBus()
 
         self.channels: dict[str, Channel] = {}  # channel_id -> Channel
-        self._dest_to_cid: dict[bytes, str] = {}  # destination hash -> channel_id
         self._channel_hash_to_cid: dict[bytes, str] = {}  # Channel_Hash -> channel_id
         self.trusted: set[bytes] = set()
         self.blocked: set[bytes] = set()
@@ -113,65 +117,6 @@ class Client:
         return self._router is not None
 
     # ------------------------------------------------------------------
-    # Group destination factory
-    # ------------------------------------------------------------------
-
-    def _make_group_destination(self, channel_name: str, key: bytes | None = None):
-        """
-        Create an RNS GROUP destination for a channel.
-
-        Both the group identity and the symmetric encryption key are
-        derived deterministically from the channel name (for open
-        channels) so that any client joining the same name arrives
-        at the same destination hash and can decrypt traffic.
-
-        For private channels, pass *key* (32 bytes) to use as the
-        symmetric key instead of deriving one from the name.
-
-        Returns an RNS.Destination or None if not connected.
-        """
-        if self._router is None:
-            return None
-
-        import RNS
-
-        # Derive 64 bytes of key material from the channel name.
-        # RNS.Identity.from_bytes needs 64 bytes: 32 for X25519 + 32 for Ed25519.
-        if key:
-            seed = f"lxcf:channel:{channel_name}:{key.hex()}".encode("utf-8")
-        else:
-            seed = f"lxcf:channel:{channel_name}".encode("utf-8")
-
-        identity_key_material = hashlib.sha512(seed).digest()  # 64 bytes
-
-        group_identity = RNS.Identity.from_bytes(identity_key_material)
-        if group_identity is None:
-            raise RuntimeError(f"Failed to create group identity for {channel_name}")
-
-        dest = RNS.Destination(
-            group_identity,
-            RNS.Destination.IN,
-            RNS.Destination.GROUP,
-            LXCF_APP_NAME,
-            LXCF_GROUP_ASPECT,
-        )
-
-        # Derive or load the symmetric key for GROUP encryption.
-        if key is not None:
-            dest.load_private_key(key)
-        else:
-            # Deterministic symmetric key from channel name,
-            # using a different derivation than the identity.
-            sym_key = hashlib.sha256(
-                f"lxcf:channel_key:{channel_name}".encode("utf-8")
-            ).digest()
-            dest.load_private_key(sym_key)
-
-        dest.set_packet_callback(self._on_group_packet)
-
-        return dest
-
-    # ------------------------------------------------------------------
     # Channel management
     # ------------------------------------------------------------------
 
@@ -184,22 +129,20 @@ class Client:
         channel_name : str
             Channel to join.
         key : bytes | None
-            32-byte symmetric key for private channels.
+            32-byte symmetric passphrase key for private channels.
         announce : bool
             If True (default), broadcast a JOIN stanza so other
             members know you're here.  Set to False to join silently.
         hub : bytes | None
             16-byte destination hash of the hub to route through.
-            When set, channel messages are sent as Channel Envelopes
-            to the hub via LXMF SINGLE delivery.  When None, the
-            channel uses the existing GROUP destination behavior.
+            All channel traffic is sent as Channel Envelopes to the
+            hub via LXMF SINGLE delivery.
         """
-        cid = channel_id(channel_name, key)
+        cid = channel_id(channel_name, hub)
         if cid in self.channels:
             return self.channels[cid]
 
-        group_dest = self._make_group_destination(channel_name, key=key)
-        ch = Channel(channel_name, self, group_destination=group_dest)
+        ch = Channel(channel_name, self)
         ch._cid = cid
         ch.channel_hash = derive_channel_hash(channel_name, key)
         ch.hub_hash = hub
@@ -207,17 +150,16 @@ class Client:
         self.channels[cid] = ch
         self._channel_hash_to_cid[ch.channel_hash] = cid
 
-        if group_dest is not None:
-            self._dest_to_cid[group_dest.hash] = cid
-
         ch._member_join(self.nick, source_hash=getattr(self._destination, "hash", None))
+
+        # DEBUG: remove for production
+        dest_hex = self._destination.hash.hex() if self._destination else "none"
+        _dbg(f"[client-debug] JOIN: cid={cid} ch_hash={ch.channel_hash.hex()[:8]} our_dest={dest_hex} hub={hub.hex() if hub else 'none'}")
 
         if announce:
             join_msg = LXCFMessage.join(self.nick, channel_name)
             if hub is not None:
                 self._send_to_hub(ch, join_msg)
-            else:
-                self._send_to_channel(ch, join_msg)
         self.events.emit("join", ch, self.nick)
         log.info("Joined %s%s", channel_name, "" if announce else " (silent)")
         return ch
@@ -227,21 +169,14 @@ class Client:
         ch = self.channels.pop(channel_id_or_name, None)
         if ch is None:
             return
+
+        # DEBUG: remove for production
+        _dbg(f"[client-debug] LEAVE: cid={channel_id_or_name} ch_hash={ch.channel_hash.hex()[:8]}")
+
         if announce:
             leave_msg = LXCFMessage.leave(self.nick, ch.name)
             if ch.hub_hash is not None:
                 self._send_to_hub(ch, leave_msg)
-            else:
-                self._send_to_channel(ch, leave_msg)
-
-        # Deregister the GROUP destination so it can be re-created on rejoin.
-        if ch.destination is not None:
-            self._dest_to_cid.pop(ch.destination.hash, None)
-            try:
-                import RNS
-                RNS.Transport.deregister_destination(ch.destination)
-            except Exception:
-                pass
 
         self._channel_hash_to_cid.pop(ch.channel_hash, None)
 
@@ -255,13 +190,15 @@ class Client:
         """
         old_nick = self.nick
         self.nick = new_nick
+        my_hash = getattr(self._destination, "hash", None)
 
         for ch in self.channels.values():
-            ts = ch.members.pop(old_nick, None)
-            ch.members[new_nick] = ts or time.time()
-            h = ch.member_hashes.pop(old_nick, None)
-            if h:
-                ch.member_hashes[new_nick] = h
+            if my_hash:
+                ch._member_nick_change(my_hash, new_nick)
+            else:
+                # Local mode fallback — re-key by nick
+                ts = ch.members.pop(old_nick, None)
+                ch.members[new_nick] = ts or time.time()
 
             if announce:
                 nick_msg = LXCFMessage(
@@ -283,7 +220,6 @@ class Client:
         """Send a message to a joined channel by channel_id or name."""
         ch = self.channels.get(channel_id_or_name)
         if ch is None:
-            # Fall back to name match (for open channels where cid == name).
             for c in self.channels.values():
                 if c.name == channel_id_or_name:
                     ch = c
@@ -351,20 +287,18 @@ class Client:
     # ------------------------------------------------------------------
 
     def _send_to_channel(self, channel: Channel, msg: LXCFMessage):
-        """Dispatch a message to a channel."""
+        """Dispatch a message to a channel via its hub."""
         channel._record(msg)
 
-        # Only emit chat-style events here. Join/leave/announce are
-        # emitted explicitly by join()/leave()/announce_presence() with
-        # their own signatures, so we skip them to avoid double-firing.
-        if msg.type not in (MessageType.JOIN, MessageType.LEAVE, MessageType.ANNOUNCE):
+        # Tag as locally originated so event handlers can distinguish
+        # self-echo from hub-relayed messages with the same nick.
+        msg._local = True
+
+        if msg.type not in (MessageType.JOIN, MessageType.LEAVE, MessageType.ANNOUNCE, MessageType.NICK):
             self.events.emit(msg.type, channel, msg)
 
-        if self._router is not None:
-            if channel.hub_hash is not None:
-                self._send_to_hub(channel, msg)
-            elif channel.destination is not None:
-                self._lxmf_send_group(channel, msg)
+        if self._router is not None and channel.hub_hash is not None:
+            self._send_to_hub(channel, msg)
 
     def _send_to_hub(self, channel: Channel, msg: LXCFMessage):
         """Wrap an LXCFMessage in a Channel Envelope and send to the hub."""
@@ -374,7 +308,6 @@ class Client:
         msg_fields = msg.to_fields()
         custom_data = msg_fields[FIELD_CUSTOM_DATA]
 
-        # Encrypt the inner stanza for private channels
         if channel.key is not None:
             custom_data = encrypt_custom_data(custom_data, channel.key)
 
@@ -384,6 +317,10 @@ class Client:
             custom_type=msg_fields[FIELD_CUSTOM_TYPE],
             custom_data=custom_data,
         )
+
+        # DEBUG: remove for production
+        stanza_type = msg.type if hasattr(msg, "type") else "?"
+        _dbg(f"[client-debug] _send_to_hub: type={stanza_type} ch={channel.channel_hash.hex()[:8]} src(our dest)={self._destination.hash.hex()} hub={channel.hub_hash.hex()}")
 
         try:
             import RNS
@@ -396,6 +333,8 @@ class Client:
             if recipient_identity is None:
                 RNS.Transport.request_path(dest_hash)
                 log.info("Path to hub %s unknown, requested — message queued", dest_hash.hex())
+                # DEBUG: remove for production
+                _dbg(f"[client-debug]   hub identity unknown, requested path")
 
                 lxm = LXMF.LXMessage(
                     None,
@@ -412,6 +351,8 @@ class Client:
                     RNS.Destination.SINGLE,
                     "lxmf", "delivery",
                 )
+                # DEBUG: remove for production
+                _dbg(f"[client-debug]   hub identity recalled OK, dest={dest.hash.hex()}")
                 lxm = LXMF.LXMessage(
                     dest,
                     self._destination,
@@ -421,8 +362,12 @@ class Client:
                 )
 
             self._router.handle_outbound(lxm)
+            # DEBUG: remove for production
+            _dbg(f"[client-debug]   handle_outbound OK")
         except Exception as exc:
             log.error("LXMF send to hub failed: %s", exc)
+            # DEBUG: remove for production
+            _dbg(f"[client-debug]   SEND FAILED: {exc}")
 
     def _send_direct(self, destination_hash: bytes, msg: LXCFMessage):
         """Send a direct LXMF message to a single destination."""
@@ -440,28 +385,6 @@ class Client:
     # LXMF integration
     # ------------------------------------------------------------------
 
-    def _lxmf_send_group(self, channel: Channel, msg: LXCFMessage):
-        """
-        Send an LXMF message to a channel's GROUP destination.
-
-        Uses OPPORTUNISTIC delivery — the message is packed into a
-        single Reticulum packet addressed to the group, which any
-        node listening on that group destination will receive.
-        """
-        try:
-            import LXMF
-
-            lxm = LXMF.LXMessage(
-                channel.destination,     # GROUP destination
-                self._destination,       # our SINGLE source
-                msg.body or "",          # content (fallback for non-LXCF clients)
-                fields=msg.to_fields(),
-                desired_method=LXMF.LXMessage.OPPORTUNISTIC,
-            )
-            self._router.handle_outbound(lxm)
-        except Exception as exc:
-            log.error("LXMF group send to %s failed: %s", channel.name, exc)
-
     def _lxmf_send_direct(self, destination_hash: bytes, msg: LXCFMessage):
         """
         Send an LXMF message to a single destination by hash.
@@ -473,15 +396,11 @@ class Client:
             import RNS
             import LXMF
 
-            # Recall the identity for this destination hash.
-            # If unknown, LXMF will queue the message and request
-            # the path automatically.
             recipient_identity = RNS.Identity.recall(destination_hash)
             if recipient_identity is None:
                 RNS.Transport.request_path(destination_hash)
                 log.info("Path to %s unknown, requested — message queued", destination_hash.hex())
 
-                # Queue with destination_hash so LXMF can resolve later
                 lxm = LXMF.LXMessage(
                     None,
                     self._destination,
@@ -509,6 +428,7 @@ class Client:
         except Exception as exc:
             log.error("LXMF direct send failed: %s", exc)
 
+
     # ------------------------------------------------------------------
     # Inbound handlers
     # ------------------------------------------------------------------
@@ -521,17 +441,30 @@ class Client:
         try:
             fields = message.fields if hasattr(message, "fields") else {}
 
+            # DEBUG: remove for production
+            src_hash = getattr(message, "source_hash", None)
+            src_hex = src_hash.hex() if src_hash else "?"
+            _dbg(f"[client-debug] _on_lxmf_delivery from {src_hex}, field_keys={[hex(k) if isinstance(k, int) else k for k in fields.keys()]}")
+
             # --- Channel Envelope path (hub-relayed messages) ---
             if ChannelEnvelope.is_envelope(fields):
                 envelope = ChannelEnvelope.from_fields(fields)
 
+                # DEBUG: remove for production
+                stanza_type = envelope.custom_data.get("t") if isinstance(envelope.custom_data, dict) else "<encrypted>"
+                _dbg(f"[client-debug]   envelope: ch={envelope.channel_hash.hex()[:8]} src={envelope.source_hash.hex()} type={stanza_type}")
+
                 # Discard if no matching local channel
                 cid = self._channel_hash_to_cid.get(envelope.channel_hash)
                 if cid is None:
+                    # DEBUG: remove for production
+                    _dbg(f"[client-debug]   DROPPED: no local channel for ch={envelope.channel_hash.hex()[:8]}")
                     return
 
                 # Suppress self-echo
                 if self._destination and envelope.source_hash == self._destination.hash:
+                    # DEBUG: remove for production
+                    _dbg(f"[client-debug]   DROPPED: self-echo (our dest={self._destination.hash.hex()})")
                     return
 
                 # Blocked sender check
@@ -542,6 +475,8 @@ class Client:
                 # Decrypt encrypted envelopes (private channels)
                 channel = self.channels.get(cid)
                 if channel is None:
+                    # DEBUG: remove for production
+                    _dbg(f"[client-debug]   DROPPED: channel object gone for cid={cid}")
                     return
 
                 if isinstance(envelope.custom_data, bytes):
@@ -556,11 +491,16 @@ class Client:
 
                 msg = envelope.unwrap()
 
+                # DEBUG: remove for production
+                _dbg(f"[client-debug]   ACCEPTED: type={msg.type} nick={msg.nick} body={msg.body[:40] if msg.body else ''}")
+
                 self._dispatch_inbound(msg, source_hash=envelope.source_hash, target_channel=channel)
                 return
 
             # --- Regular direct LXCF message path ---
             if not LXCFMessage.is_lxcf(fields):
+                # DEBUG: remove for production
+                _dbg(f"[client-debug]   NOT an LXCF message — ignoring")
                 return
 
             msg = LXCFMessage.from_fields(fields)
@@ -573,62 +513,9 @@ class Client:
             self._dispatch_inbound(msg, source_hash=source_hash)
         except Exception as exc:
             log.warning("Failed to process inbound LXCF message: %s", exc)
-
-    def _on_group_packet(self, data, packet):
-        """
-        Callback from an RNS GROUP destination when a packet arrives.
-
-        Opportunistic LXMF packets omit the destination hash prefix,
-        so the decrypted data layout is:
-            source_hash(16) + signature(64) + msgpack_payload
-
-        We prepend the destination hash (from the packet) so that
-        LXMF.LXMessage.unpack_from_bytes receives the full format it
-        expects:
-            dest_hash(16) + source_hash(16) + signature(64) + payload
-        """
-        try:
-            import LXMF
-
-            # Reconstruct the full LXMF frame expected by unpack_from_bytes
-            dest_hash = getattr(packet, "destination_hash", None)
-            if dest_hash is None:
-                return
-            full_data = bytes(dest_hash) + bytes(data)
-
-            lxm = LXMF.LXMessage.unpack_from_bytes(full_data)
-            if lxm is None:
-                return
-
-            fields = lxm.fields if hasattr(lxm, "fields") else {}
-            if not LXCFMessage.is_lxcf(fields):
-                return
-
-            msg = LXCFMessage.from_fields(fields)
-            source_hash = getattr(lxm, "source_hash", None)
-
-            # Don't echo our own messages back
-            if source_hash and self._destination:
-                if source_hash == self._destination.hash:
-                    return
-
-            if source_hash and self.is_blocked(source_hash):
-                log.debug("Blocked group message from %s", source_hash.hex())
-                return
-
-            # Resolve the target channel from the destination that
-            # received this packet, not from the channel name in the
-            # stanza (which may be ambiguous across subnets).
-            dest_hash = getattr(packet, "destination_hash", None)
-            target_ch = None
-            if dest_hash:
-                cid = self._dest_to_cid.get(dest_hash)
-                if cid:
-                    target_ch = self.channels.get(cid)
-
-            self._dispatch_inbound(msg, source_hash=source_hash, target_channel=target_ch)
-        except Exception as exc:
-            log.warning("Failed to process inbound group packet: %s", exc)
+            # DEBUG: remove for production
+            import traceback
+            traceback.print_exc()
 
     def _dispatch_inbound(self, msg: LXCFMessage, source_hash: bytes | None = None, target_channel: "Channel | None" = None):
         """Route an inbound LXCFMessage to the right event handlers."""
@@ -639,7 +526,6 @@ class Client:
                 return target_channel
             if name is None:
                 return None
-            # Fall back to name scan (for local mode / direct deliveries).
             for ch in self.channels.values():
                 if ch.name == name:
                     return ch
@@ -663,24 +549,13 @@ class Client:
         elif msg.type == MessageType.LEAVE:
             ch = _resolve(msg.channel)
             if ch:
-                ch._member_leave(msg.nick)
+                ch._member_leave(msg.nick, source_hash=source_hash)
             self.events.emit("leave", ch, msg.nick)
 
         elif msg.type == MessageType.NICK:
             ch = _resolve(msg.channel)
             if ch and source_hash:
-                old_nick = None
-                for nick, h in ch.member_hashes.items():
-                    if h == source_hash:
-                        old_nick = nick
-                        break
-                if old_nick:
-                    ts = ch.members.pop(old_nick, None)
-                    ch.members[msg.nick] = ts or msg.timestamp
-                    ch.member_hashes.pop(old_nick, None)
-                else:
-                    ch.members[msg.nick] = msg.timestamp
-                ch.member_hashes[msg.nick] = source_hash
+                old_nick = ch._member_nick_change(source_hash, msg.nick, msg.timestamp)
                 self.events.emit("nick", old_nick or msg.nick, msg.nick)
             else:
                 self.events.emit("nick", msg.nick, msg.nick)

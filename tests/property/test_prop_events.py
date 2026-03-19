@@ -68,7 +68,7 @@ def test_eventbus_off_precision(event: str):
 @given(
     args=st.lists(st.integers(), min_size=0, max_size=5),
     kwargs=st.dictionaries(
-        st.text(alphabet=st.characters(whitelist_categories=("L",)), min_size=1, max_size=10),
+        st.text(alphabet=st.characters(whitelist_categories=("L",)), min_size=1, max_size=10).filter(lambda s: s != "event"),
         st.integers(),
         max_size=5,
     ),
