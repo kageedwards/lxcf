@@ -6,3 +6,4 @@ dist/
 build/
 .hypothesis/
 .DS_Store
+package-lock.json

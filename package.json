@@ -2,5 +2,8 @@
   "name": "lxcf",
   "version": "0.1.0",
   "description": "LXCF Python bridge — packaged for Portulus",
-  "private": true
+  "private": true,
+  "scripts": {
+    "postinstall": "python3 -m pip install --quiet rns lxmf msgpack"
+  }
 }
