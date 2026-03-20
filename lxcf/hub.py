@@ -128,7 +128,8 @@ class Hub:
         For LEAVE stanzas: relay to remaining subscribers, then remove
         sender from subscriber set.
 
-        All other stanza types are relayed without side effects.
+        All other stanza types: auto-subscribe the sender if not already
+        subscribed (implicit join), then relay to other subscribers.
         """
         ch = envelope.channel_hash
         src = envelope.source_hash
@@ -176,8 +177,29 @@ class Hub:
                     del self._subscriptions[ch]
 
         else:
-            # All other stanza types: relay without side effects
-            subs = self._subscriptions.get(ch, set())
+            # Auto-subscribe: if sender isn't subscribed, treat as implicit join
+            if ch not in self._subscriptions:
+                if len(self._subscriptions) >= self._max_channels:
+                    log.warning(
+                        "Hub: channel limit reached (%d), discarding message for %s",
+                        self._max_channels, ch.hex()[:8],
+                    )
+                    return
+                self._subscriptions[ch] = set()
+
+            subs = self._subscriptions[ch]
+            if src not in subs:
+                if len(subs) >= self._max_subscribers_per_channel:
+                    log.warning(
+                        "Hub: subscriber limit reached (%d) for channel %s, "
+                        "discarding message from %s",
+                        self._max_subscribers_per_channel, ch.hex()[:8], src.hex()[:8],
+                    )
+                    return
+                subs.add(src)
+                # DEBUG: remove for production
+                print(f"[hub-debug] AUTO-JOIN: added {src.hex()} to ch={ch.hex()[:8]} on first message", flush=True)
+
             targets = subs - {src}
             # DEBUG: remove for production
             print(f"[hub-debug] RELAY type={stanza_type}: from {src.hex()} on ch={ch.hex()[:8]}, relaying to {[t.hex() for t in targets]} (total subs: {[s.hex() for s in subs]})", flush=True)

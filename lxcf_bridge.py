@@ -120,11 +120,13 @@ class Bridge:
             self._send_members(channel)
 
         @c.on_leave
-        def on_leave(channel, nick):
+        def on_leave(channel, nick, source_hash=None):
+            suffix = source_hash.hex()[:8] if source_hash else None
             self.write_event({
                 "event": "leave",
                 "cid": channel._cid if channel else None,
                 "nick": nick,
+                "suffix": suffix,
             })
             self._send_members(channel)
 

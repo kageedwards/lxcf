@@ -180,7 +180,8 @@ class Client:
 
         self._channel_hash_to_cid.pop(ch.channel_hash, None)
 
-        self.events.emit("leave", ch, self.nick)
+        my_hash = getattr(self._destination, "hash", None)
+        self.events.emit("leave", ch, self.nick, my_hash)
         log.info("Left %s%s", ch.name, "" if announce else " (silent)")
 
     def change_nick(self, new_nick: str, announce: bool = True):
@@ -548,9 +549,12 @@ class Client:
 
         elif msg.type == MessageType.LEAVE:
             ch = _resolve(msg.channel)
+            leaving_hash = source_hash
+            if ch and not leaving_hash:
+                leaving_hash = ch.member_hashes.get(msg.nick)
             if ch:
                 ch._member_leave(msg.nick, source_hash=source_hash)
-            self.events.emit("leave", ch, msg.nick)
+            self.events.emit("leave", ch, msg.nick, leaving_hash)
 
         elif msg.type == MessageType.NICK:
             ch = _resolve(msg.channel)
