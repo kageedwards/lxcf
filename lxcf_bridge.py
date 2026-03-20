@@ -141,15 +141,17 @@ class Bridge:
                 "suffix": suffix,
             })
 
-        c.events.on("nick", lambda old, new: self._on_nick(old, new))
+        c.events.on("nick", lambda old, new, h=None: self._on_nick(old, new, h))
         c.events.on("emote", lambda ch, msg: self._on_emote(ch, msg))
         c.events.on("topic", lambda ch, msg: self._on_topic(ch, msg))
 
-    def _on_nick(self, old_nick: str, new_nick: str) -> None:
+    def _on_nick(self, old_nick: str, new_nick: str, source_hash: bytes | None = None) -> None:
+        suffix = source_hash.hex()[:8] if source_hash else None
         self.write_event({
             "event": "nick",
             "old_nick": old_nick,
             "new_nick": new_nick,
+            "suffix": suffix,
         })
         # refresh members on all channels
         for ch in self.client.channels.values():

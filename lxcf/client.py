@@ -208,7 +208,7 @@ class Client:
                 )
                 self._send_to_channel(ch, nick_msg)
 
-        self.events.emit("nick", old_nick, new_nick)
+        self.events.emit("nick", old_nick, new_nick, my_hash)
         log.info("Nick changed: %s -> %s%s", old_nick, new_nick,
                  "" if announce else " (silent)")
 
@@ -560,9 +560,9 @@ class Client:
             ch = _resolve(msg.channel)
             if ch and source_hash:
                 old_nick = ch._member_nick_change(source_hash, msg.nick, msg.timestamp)
-                self.events.emit("nick", old_nick or msg.nick, msg.nick)
+                self.events.emit("nick", old_nick or msg.nick, msg.nick, source_hash)
             else:
-                self.events.emit("nick", msg.nick, msg.nick)
+                self.events.emit("nick", msg.nick, msg.nick, source_hash)
 
         elif msg.type == MessageType.TOPIC:
             ch = _resolve(msg.channel)
